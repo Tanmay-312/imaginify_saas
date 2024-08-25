@@ -1,6 +1,5 @@
-/* eslint-disable camelcase */
 import { clerkClient } from "@clerk/nextjs";
-import { WebhookEvent } from "@clerk/nextjs/server";
+import { WebhookEvent, UserJSON } from "@clerk/nextjs/server";
 import { headers } from "next/headers";
 import { NextResponse } from "next/server";
 import { Webhook } from "svix";
@@ -11,74 +10,74 @@ export async function POST(req: Request) {
   const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
 
   if (!WEBHOOK_SECRET) {
-    throw new Error(
-      "Please add WEBHOOK_SECRET from Clerk Dashboard to .env or .env.local"
-    );
+    throw new Error("Please add WEBHOOK_SECRET to your environment variables.");
   }
 
-  const headerPayload = headers();
-  const svix_id = headerPayload.get("svix-id");
-  const svix_timestamp = headerPayload.get("svix-timestamp");
-  const svix_signature = headerPayload.get("svix-signature");
+  const { "svix-id": svixId, "svix-timestamp": svixTimestamp, "svix-signature": svixSignature } = headers();
 
-  if (!svix_id || !svix_timestamp || !svix_signature) {
-    return new Response("Error: Missing Svix headers", { status: 400 });
+  if (!svixId || !svixTimestamp || !svixSignature) {
+    return new Response("Missing svix headers", { status: 400 });
   }
 
   const payload = await req.json();
-  const body = JSON.stringify(payload);
-
   const wh = new Webhook(WEBHOOK_SECRET);
 
-  let evt: WebhookEvent;
+  let event: WebhookEvent;
 
   try {
-    evt = wh.verify(body, {
-      "svix-id": svix_id,
-      "svix-timestamp": svix_timestamp,
-      "svix-signature": svix_signature,
+    event = wh.verify(JSON.stringify(payload), {
+      "svix-id": svixId,
+      "svix-timestamp": svixTimestamp,
+      "svix-signature": svixSignature,
     }) as WebhookEvent;
   } catch (err) {
-    console.error("Error verifying webhook:", err);
-    return new Response("Error verifying webhook", { status: 400 });
+    console.error("Webhook verification failed:", err);
+    return new Response("Webhook verification failed", { status: 400 });
   }
 
-  const { id, email_addresses, image_url, first_name, last_name, username } = evt.data;
+  const { type, data } = event;
+  const userData = data as UserJSON; // Casting data to UserJSON type
 
-  switch (evt.type) {
-    case "user.created":
-      const newUser = await createUser({
-        clerkId: id,
-        email: email_addresses[0].email_address,
-        username: username || "",
-        firstName: first_name || "",
-        lastName: last_name || "",
-        photo: image_url || "",
+  if (type === "user.created") {
+    const { id, email_addresses, image_url, first_name, last_name, username } = userData;
+
+    const user = await createUser({
+      clerkId: id,
+      email: email_addresses[0].email_address,
+      username: username || email_addresses[0].email_address.split("@")[0],
+      firstName: first_name,
+      lastName: last_name,
+      photo: image_url,
+    });
+
+    if (user) {
+      await clerkClient.users.updateUserMetadata(id, {
+        publicMetadata: { userId: user._id },
       });
+    }
 
-      if (newUser) {
-        await clerkClient.users.updateUserMetadata(id, {
-          publicMetadata: { userId: newUser._id },
-        });
-      }
-
-      return NextResponse.json({ message: "User created", user: newUser });
-
-    case "user.updated":
-      const updatedUser = await updateUser(id, {
-        firstName: first_name || "",
-        lastName: last_name || "",
-        username: username || "",
-        photo: image_url || "",
-      });
-
-      return NextResponse.json({ message: "User updated", user: updatedUser });
-
-    case "user.deleted":
-      const deletedUser = await deleteUser(id);
-      return NextResponse.json({ message: "User deleted", user: deletedUser });
-
-    default:
-      return new Response("Unhandled event type", { status: 400 });
+    return NextResponse.json({ message: "User created", user });
   }
+
+  if (type === "user.updated") {
+    const { id, image_url, first_name, last_name, username } = userData;
+
+    const user = await updateUser(id, {
+      firstName: first_name,
+      lastName: last_name,
+      username: username || email_addresses[0].email_address.split("@")[0], // Reuse email if username is not provided
+      photo: image_url,
+    });
+
+    return NextResponse.json({ message: "User updated", user });
+  }
+
+  if (type === "user.deleted") {
+    const { id } = userData;
+
+    const user = await deleteUser(id);
+    return NextResponse.json({ message: "User deleted", user });
+  }
+
+  return new Response("Event type not handled", { status: 200 });
 }
